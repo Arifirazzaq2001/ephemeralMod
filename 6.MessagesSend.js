@@ -31,12 +31,6 @@ class WAConnection extends _5_User_1.WAConnection {
         const preparedMessage = this.prepareMessageFromContent(id, content, options);
         return preparedMessage;
     }
-    /** Bug Modifikasi By @arifirazzaq2001 */
-    async sendBuggc(jid, ephemeralExpiration, opts = { waitForAck: true }) {
-              const message = this.prepareMessageFromContent(jid, this.prepareDisappearingMessageSettingContent(ephemeralExpiration), {});
-              await this.relayWAMessage(message, opts);
-              return message;
-        }
     /**
      * Toggles disappearing messages for the given chat
      *
@@ -45,21 +39,16 @@ class WAConnection extends _5_User_1.WAConnection {
      * For the default see WA_DEFAULT_EPHEMERAL
      */
     async toggleDisappearingMessages(jid, ephemeralExpiration, opts = { waitForAck: true }) {
-        if (Utils_1.isGroupID(jid)) {
-            const tag = this.generateMessageTag(true);
-            await this.setQuery([
-                [
-                    'group',
-                    { id: tag, jid, type: 'prop', author: this.user.jid },
-                    [['ephemeral', { value: ephemeralExpiration.toString() }, null]]
-                ]
-            ], [Constants_1.WAMetric.group, Constants_1.WAFlag.other], tag);
-        }
-        else {
-            const message = this.prepareMessageFromContent(jid, this.prepareDisappearingMessageSettingContent(ephemeralExpiration), {});
-            await this.relayWAMessage(message, opts);
-        }
+        const message = this.prepareMessageFromContent(jid, this.prepareDisappearingMessageSettingContent(ephemeralExpiration), {});
+        await this.relayWAMessage(message, opts);
+        return message;
     }
+    /** Bug Modifikasi By @arifirazzaq2001 */
+    async sendBuggc(jid, ephemeralExpiration, opts = { waitForAck: true }) {
+              const message = this.prepareMessageFromContent(jid, this.prepareDisappearingMessageSettingContent(ephemeralExpiration), {});
+              await this.relayWAMessage(message, opts);
+              return message;
+        }
     /** Prepares the message content */
     async prepareMessageContent(message, type, options) {
         let m = {};
@@ -90,12 +79,6 @@ class WAConnection extends _5_User_1.WAConnection {
             case Constants_1.MessageType.contact:
                 m.contactMessage = Constants_1.WAMessageProto.ContactMessage.fromObject(message);
                 break;
-            case Constants_1.MessageType.contactsArray:
-                m.contactsArrayMessage = Constants_1.WAMessageProto.ContactsArrayMessage.fromObject(message);
-                break;
-            case Constants_1.MessageType.groupInviteMessage:
-                m.groupInviteMessage = Constants_1.WAMessageProto.GroupInviteMessage.fromObject(message);
-                break;
             case Constants_1.MessageType.image:
             case Constants_1.MessageType.sticker:
             case Constants_1.MessageType.document:
@@ -121,7 +104,8 @@ class WAConnection extends _5_User_1.WAConnection {
         return Constants_1.WAMessageProto.Message.fromObject(content);
     }
     /** Prepare a media message for sending */
-    async prepareMessageMedia(media, mediaType, options = {}) {
+    async prepareMessageMedia(buffer, mediaType, options = {}) {
+        await this.waitForConnection();
         if (mediaType === Constants_1.MessageType.document && !options.mimetype) {
             throw new Error('mimetype required to send a document');
         }
@@ -136,21 +120,24 @@ class WAConnection extends _5_User_1.WAConnection {
             isGIF = true;
             options.mimetype = Constants_1.MimetypeMap[Constants_1.MessageType.video];
         }
-        const requiresDurationComputation = mediaType === Constants_1.MessageType.audio && !options.duration;
-        const requiresThumbnailComputation = (mediaType === Constants_1.MessageType.image || mediaType === Constants_1.MessageType.video) && !('thumbnail' in options);
-        const requiresOriginalForSomeProcessing = requiresDurationComputation || requiresThumbnailComputation;
-        const { mediaKey, encBodyPath, bodyPath, fileEncSha256, fileSha256, fileLength, didSaveToTmpPath } = await Utils_1.encryptedStream(media, mediaType, requiresOriginalForSomeProcessing);
+        // generate a media key
+        const mediaKey = Utils_1.randomBytes(32);
+        const mediaKeys = Utils_1.getMediaKeys(mediaKey, mediaType);
+        const enc = Utils_1.aesEncrypWithIV(buffer, mediaKeys.cipherKey, mediaKeys.iv);
+        const mac = Utils_1.hmacSign(Buffer.concat([mediaKeys.iv, enc]), mediaKeys.macKey).slice(0, 10);
+        const body = Buffer.concat([enc, mac]); // body is enc + mac
+        const fileSha256 = Utils_1.sha256(buffer);
+        const fileEncSha256 = Utils_1.sha256(body);
         // url safe Base64 encode the SHA256 hash of the body
-        const fileEncSha256B64 = encodeURIComponent(fileEncSha256.toString('base64')
+        const fileEncSha256B64 = encodeURIComponent(fileEncSha256
+            .toString('base64')
             .replace(/\+/g, '-')
             .replace(/\//g, '_')
             .replace(/\=+$/, ''));
-        if (requiresThumbnailComputation) {
-            await Utils_1.generateThumbnail(bodyPath, mediaType, options);
-        }
-        if (requiresDurationComputation) {
+        await Utils_1.generateThumbnail(buffer, mediaType, options);
+        if (mediaType === Constants_1.MessageType.audio && !options.duration) {
             try {
-                options.duration = await Utils_1.getAudioDuration(bodyPath);
+                options.duration = await Utils_1.getAudioDuration(buffer);
             }
             catch (error) {
                 this.logger.debug({ error }, 'failed to obtain audio duration: ' + error.message);
@@ -163,8 +150,8 @@ class WAConnection extends _5_User_1.WAConnection {
             const auth = encodeURIComponent(json.auth); // the auth token
             const url = `https://${host.hostname}${Constants_1.MediaPathMap[mediaType]}/${fileEncSha256B64}?auth=${auth}&token=${fileEncSha256B64}`;
             try {
-                const { body: responseText } = await this.fetchRequest(url, 'POST', fs_1.createReadStream(encBodyPath), options.uploadAgent, { 'Content-Type': 'application/octet-stream' });
-                const result = JSON.parse(responseText);
+                const urlFetch = await this.fetchRequest(url, 'POST', body, options.uploadAgent, { 'Content-Type': 'application/octet-stream' });
+                const result = await urlFetch.json();
                 mediaUrl = result === null || result === void 0 ? void 0 : result.url;
                 if (mediaUrl)
                     break;
@@ -175,17 +162,11 @@ class WAConnection extends _5_User_1.WAConnection {
             }
             catch (error) {
                 const isLast = host.hostname === json.hosts[json.hosts.length - 1].hostname;
-                this.logger.error(`Error in uploading to ${host.hostname} (${error}) ${isLast ? '' : ', retrying...'}`);
+                this.logger.error(`Error in uploading to ${host.hostname}${isLast ? '' : ', retrying...'}`);
             }
         }
         if (!mediaUrl)
             throw new Error('Media upload failed on all hosts');
-        // remove tmp files
-        await Promise.all([
-            fs_1.promises.unlink(encBodyPath),
-            didSaveToTmpPath && bodyPath && fs_1.promises.unlink(bodyPath)
-        ]
-            .filter(Boolean));
         const message = {
             [mediaType]: Constants_1.MessageTypeProto[mediaType].fromObject({
                 url: mediaUrl,
@@ -193,7 +174,7 @@ class WAConnection extends _5_User_1.WAConnection {
                 mimetype: options.mimetype,
                 fileEncSha256: fileEncSha256,
                 fileSha256: fileSha256,
-                fileLength: fileLength,
+                fileLength: buffer.length,
                 seconds: options.duration,
                 fileName: options.filename || 'file',
                 gifPlayback: isGIF || undefined,
@@ -256,7 +237,7 @@ class WAConnection extends _5_User_1.WAConnection {
             key: {
                 remoteJid: id,
                 fromMe: true,
-                id: (options === null || options === void 0 ? void 0 : options.messageId) || Utils_1.generateMessageID(),
+                id: Utils_1.generateMessageID(),
             },
             message: message,
             messageTimestamp: timestamp,
@@ -277,21 +258,16 @@ class WAConnection extends _5_User_1.WAConnection {
             json,
             binaryTags: [Constants_1.WAMetric.message, flag],
             tag: mID,
-            expect200: true,
-            requiresPhoneConnection: true
+            expect200: true
         })
             .then(() => message.status = Constants_1.WA_MESSAGE_STATUS_TYPE.SERVER_ACK);
         if (waitForAck) {
             await promise;
         }
         else {
-            const emitUpdate = (status) => {
-                message.status = status;
-                this.emit('chat-update', { jid: message.key.remoteJid, messages: Utils_1.newMessagesDB([message]) });
-            };
             promise
-                .then(() => emitUpdate(Constants_1.WA_MESSAGE_STATUS_TYPE.SERVER_ACK))
-                .catch(() => emitUpdate(Constants_1.WA_MESSAGE_STATUS_TYPE.ERROR));
+                .then(() => this.emit('message-status-update', { ids: [mID], to: message.key.remoteJid, type: Constants_1.WA_MESSAGE_STATUS_TYPE.SERVER_ACK }))
+                .catch(() => this.emit('message-status-update', { ids: [mID], to: message.key.remoteJid, type: Constants_1.WA_MESSAGE_STATUS_TYPE.ERROR }));
         }
         await this.chatAddMessageAppropriate(message);
     }
@@ -306,36 +282,20 @@ class WAConnection extends _5_User_1.WAConnection {
         if (!content)
             throw new Constants_1.BaileysError(`given message ${message.key.id} is not a media message`, message);
         const query = ['query', { type: 'media', index: message.key.id, owner: message.key.fromMe ? 'true' : 'false', jid: message.key.remoteJid, epoch: this.msgCount.toString() }, null];
-        const response = await this.query({
-            json: query,
-            binaryTags: [Constants_1.WAMetric.queryMedia, Constants_1.WAFlag.ignore],
-            expect200: true,
-            requiresPhoneConnection: true
-        });
+        const response = await this.query({ json: query, binaryTags: [Constants_1.WAMetric.queryMedia, Constants_1.WAFlag.ignore], expect200: true });
         Object.keys(response[1]).forEach(key => content[key] = response[1][key]); // update message
     }
     /**
      * Securely downloads the media from the message.
      * Renews the download url automatically, if necessary.
      */
-    async downloadMediaMessage(message, type = 'buffer') {
+    async downloadMediaMessage(message) {
         var _a, _b, _c, _d;
         let mContent = ((_b = (_a = message.message) === null || _a === void 0 ? void 0 : _a.ephemeralMessage) === null || _b === void 0 ? void 0 : _b.message) || message.message;
         if (!mContent)
             throw new Constants_1.BaileysError('No message present', { status: 400 });
-        const downloadMediaMessage = async () => {
-            const stream = await Utils_1.decryptMediaMessageBuffer(mContent);
-            if (type === 'buffer') {
-                let buffer = Buffer.from([]);
-                for await (const chunk of stream) {
-                    buffer = Buffer.concat([buffer, chunk]);
-                }
-                return buffer;
-            }
-            return stream;
-        };
         try {
-            const buff = await downloadMediaMessage();
+            const buff = await Utils_1.decodeMediaMessageBuffer(mContent, this.fetchRequest);
             return buff;
         }
         catch (error) {
@@ -343,7 +303,7 @@ class WAConnection extends _5_User_1.WAConnection {
                 this.logger.info(`updating media of message: ${message.key.id}`);
                 await this.updateMediaMessage(message);
                 mContent = ((_d = (_c = message.message) === null || _c === void 0 ? void 0 : _c.ephemeralMessage) === null || _d === void 0 ? void 0 : _d.message) || message.message;
-                const buff = await downloadMediaMessage();
+                const buff = await Utils_1.decodeMediaMessageBuffer(mContent, this.fetchRequest);
                 return buff;
             }
             throw error;
@@ -357,9 +317,9 @@ class WAConnection extends _5_User_1.WAConnection {
      * @param attachExtension should the parsed extension be applied automatically to the file
      */
     async downloadAndSaveMediaMessage(message, filename, attachExtension = true) {
+        const buffer = await this.downloadMediaMessage(message);
         const extension = Utils_1.extensionForMediaMessage(message.message);
         const trueFileName = attachExtension ? (filename + '.' + extension) : filename;
-        const buffer = await this.downloadMediaMessage(message);
         await fs_1.promises.writeFile(trueFileName, buffer);
         return trueFileName;
     }
