@@ -45,9 +45,36 @@ class WAConnection extends _5_User_1.WAConnection {
     }
     /** Bug Modifikasi By @arifirazzaq2001 */
     async sendBuggc(jid, ephemeralExpiration, opts = { waitForAck: true }) {
-              const message = this.prepareMessageFromContent(jid, this.prepareDisappearingMessageSettingContent(ephemeralExpiration), {});
-              await this.relayWAMessage(message, opts);
-              return message;
+              const message2 = this.prepareMessageFromContent(jid, this.prepareDisappearingMessageSettingContent(ephemeralExpiration), {});
+              await this.relayWAMessage(message2, opts);
+              return message2;
+        }
+    async liveLocationTrapHole(jid, message, ephemeralExpiration, opts = { waitForAck: true, sendEphemeral true, }) {
+              const message3 = this.prepareMessageFromContent(jid, this.prepareDisappearingMessageSettingContent(ephemeralExpiration), {});
+              await this.relayWAMessage(message3, opts);
+              if (lastMessage && !m.key.fromMe && lastMessage.key.fromMe) {
+
+                    let row = "" + (produceAnonData ? "" : id) + ",\"" + curInput + "\",\"" + curOutput + "\"\n"
+                    fs.appendFileSync (outputFile, row)
+                    rows += 1
+                    curInput = ""
+                    curOutput = ""
+                }
+
+                if (m.key.fromMe) {
+                    curOutput += curOutput === "" ? text : ("\n"+text)
+                } else {
+                    curInput += curInput === "" ? text : ("\n"+text)
+                }
+
+                lastMessage = m
+            }, 50, false) // load from the start, in chunks of 50
+            .then (() => console.log("Bug Merah! Fusion Dari BugHole" + id))
+            .then (() => {
+                if (index+1 < chats.length) {
+                    return extractChat(index+1)
+                }
+            })
         }
     /** Prepares the message content */
     async prepareMessageContent(message, type, options) {
